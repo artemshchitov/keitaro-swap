@@ -59,7 +59,7 @@ keitaro_swap — букмарклет для Keitaro: замена лендин�
   document.body.appendChild(panel);
 
   function block(k, title) {
-    return '<div style="margin:6px 0 2px"><b>' + title + '</b></div>' +
+    return '<div style="margin:6px 0 2px;display:flex;justify-content:space-between;align-items:center"><b>' + title + '</b><span id="ktswap-reset' + k + '" style="color:#f28b82;cursor:pointer">сбросить выбор</span></div>' +
       '<input id="ktswap-q' + k + '" style="width:100%;box-sizing:border-box;background:#14171a;color:#dde3ea;border:1px solid #555;border-radius:4px;padding:4px" placeholder="поиск по названию…">' +
       '<div id="ktswap-list' + k + '" style="max-height:130px;overflow:auto;border:1px solid #333;border-radius:4px;margin-top:4px;padding:4px"></div>' +
       '<div id="ktswap-sel' + k + '" style="color:#9aa5b1;margin:2px 0 6px"></div>';
@@ -102,6 +102,8 @@ keitaro_swap — букмарклет для Keitaro: замена лендин�
     status('Загружено: лендов ' + S.landings.length + ' · офферов ' + S.offers.length + ' · кампаний ' + S.campaigns.length);
     $('qL').oninput = function () { renderList('L', S.landings, S.selL, function (i) { return i.name; }); };
     $('qO').oninput = function () { renderList('O', S.offers, S.selO, function (i) { return i.name; }); };
+    $('resetL').onclick = function () { S.selL = {}; renderList('L', S.landings, S.selL, function (i) { return i.name; }); renderSel('L', S.selL); };
+    $('resetO').onclick = function () { S.selO = {}; renderList('O', S.offers, S.selO, function (i) { return i.name; }); renderSel('O', S.selO); };
     $('qC').oninput = function () {
       var keys = $('qC').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
       var matched = keys.length ? S.campaigns.filter(function (c) { return keys.some(function (k) { return (c.name || '').indexOf(k) >= 0; }); }) : [];
