@@ -1,0 +1,176 @@
+/*
+keitaro_swap — букмарклет для Keitaro: замена лендингов и офферов в кампаниях.
+
+Как поставить:
+  1. Открой скрипты/keitaro_swap_bookmarklet.txt, скопируй ВСЮ строку (начинается с javascript:).
+  2. В браузере создай закладку, в поле URL вставь эту строку, назови «KT swap».
+  3. Открой вкладку с админкой Keitaro (любая страница трекера), кликни закладку.
+
+Как работает:
+  — API-ключ спросит один раз, сохранит в localStorage этой вкладки трекера;
+  — поиск лендингов и офферов по названию, выбор галочками (можно выбрать только ленды
+    или только офферы — второе не тронется);
+  — кампании фильтруются по вхождению подстрок (ID кабинетов) в название кампании КТ,
+    подстроки через запятую;
+  — «План» показывает БЫЛО → СТАНЕТ по каждому потоку (schema=landings), «Применить» пишет.
+  Доли делятся поровну, state=active. Потоки redirect/action не трогаются.
+*/
+(function () {
+  if (document.getElementById('ktswap-panel')) { document.getElementById('ktswap-panel').remove(); }
+  var API = location.origin + '/admin_api/v1';
+  var KEY = localStorage.getItem('ktswap_key') || '';
+  if (!KEY) { KEY = prompt('API-ключ Keitaro (Настройки → API):') || ''; if (!KEY) return; localStorage.setItem('ktswap_key', KEY); }
+
+  var S = { landings: [], offers: [], campaigns: [], selL: {}, selO: {}, selC: {}, plan: [] };
+
+  function req(method, path, body) {
+    return fetch(API + path, {
+      method: method,
+      headers: { 'Api-Key': KEY, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      if (r.status === 403 || r.status === 401) { localStorage.removeItem('ktswap_key'); throw new Error('Ключ не принят (HTTP ' + r.status + '). Кликни букмарклет заново и введи ключ.'); }
+      if (!r.ok) { return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 300)); }); }
+      return r.status === 204 ? null : r.json();
+    });
+  }
+
+  function el(tag, css, html) { var e = document.createElement(tag); if (css) e.style.cssText = css; if (html !== undefined) e.innerHTML = html; return e; }
+  function esc(s) { return String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function shares(n) { var b = Math.floor(100 / n), r = 100 - b * n, a = [], i; for (i = 0; i < n; i++) a.push(i === 0 ? b + r : b); return a; }
+
+  var panel = el('div', 'position:fixed;top:10px;right:10px;width:560px;max-height:92vh;overflow:auto;z-index:999999;background:#1e2227;color:#dde3ea;font:12px/1.45 Consolas,monospace;border:1px solid #444;border-radius:8px;padding:12px;box-shadow:0 8px 30px rgba(0,0,0,.6)');
+  panel.id = 'ktswap-panel';
+  panel.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<b style="font-size:13px">KT swap — замена лендов/офферов</b>' +
+    '<span id="ktswap-close" style="cursor:pointer;padding:0 6px;font-size:16px">×</span></div>' +
+    '<div id="ktswap-status" style="color:#8ab4f8;margin-bottom:8px">Загружаю ленды, офферы, кампании…</div>' +
+    block('L', 'ЛЕНДИНГИ (пусто = не менять)') +
+    block('O', 'ОФФЕРЫ (пусто = не менять)') +
+    '<div style="margin:10px 0 4px"><b>КАМПАНИИ</b> — подстроки/ID кабинетов через запятую:</div>' +
+    '<input id="ktswap-qC" style="width:100%;box-sizing:border-box;background:#14171a;color:#dde3ea;border:1px solid #555;border-radius:4px;padding:4px" placeholder="1201801835071694, 925738917068668">' +
+    '<div id="ktswap-listC" style="max-height:160px;overflow:auto;border:1px solid #333;border-radius:4px;margin-top:4px;padding:4px"></div>' +
+    '<div id="ktswap-selC" style="color:#9aa5b1;margin:2px 0 8px"></div>' +
+    '<div style="display:flex;gap:8px;margin-top:6px">' +
+    '<button id="ktswap-plan" style="flex:1;background:#2d4a77;color:#fff;border:0;border-radius:4px;padding:6px;cursor:pointer">ПЛАН (ничего не меняет)</button>' +
+    '<button id="ktswap-apply" style="flex:1;background:#555;color:#fff;border:0;border-radius:4px;padding:6px;cursor:not-allowed" disabled>ПРИМЕНИТЬ</button></div>' +
+    '<pre id="ktswap-out" style="white-space:pre-wrap;background:#14171a;border:1px solid #333;border-radius:4px;padding:6px;margin-top:8px;max-height:220px;overflow:auto"></pre>';
+  document.body.appendChild(panel);
+
+  function block(k, title) {
+    return '<div style="margin:6px 0 2px"><b>' + title + '</b></div>' +
+      '<input id="ktswap-q' + k + '" style="width:100%;box-sizing:border-box;background:#14171a;color:#dde3ea;border:1px solid #555;border-radius:4px;padding:4px" placeholder="поиск по названию…">' +
+      '<div id="ktswap-list' + k + '" style="max-height:130px;overflow:auto;border:1px solid #333;border-radius:4px;margin-top:4px;padding:4px"></div>' +
+      '<div id="ktswap-sel' + k + '" style="color:#9aa5b1;margin:2px 0 6px"></div>';
+  }
+
+  function $(id) { return document.getElementById('ktswap-' + id); }
+  $('close').onclick = function () { panel.remove(); };
+  function status(t, err) { $('status').textContent = t; $('status').style.color = err ? '#f28b82' : '#8ab4f8'; }
+  function out(t) { $('out').textContent += t + '\n'; $('out').scrollTop = 99999; }
+
+  function renderList(k, items, sel, labelFn) {
+    var box = $('list' + k), q = $('q' + k).value.toLowerCase();
+    var found = items.filter(function (i) { return (i.name || '').toLowerCase().indexOf(q) >= 0; });
+    if (k !== 'C' && !q) { found = []; }
+    found = found.slice(0, 80);
+    box.innerHTML = found.length ? '' : '<span style="color:#777">' + (q || k === 'C' ? 'ничего не найдено' : 'введи подстроку для поиска') + '</span>';
+    found.forEach(function (i) {
+      var row = el('label', 'display:block;cursor:pointer;padding:1px 2px');
+      var cb = el('input'); cb.type = 'checkbox'; cb.checked = !!sel[i.id];
+      cb.onchange = function () { if (cb.checked) { sel[i.id] = i; } else { delete sel[i.id]; } renderSel(k, sel); };
+      row.appendChild(cb); row.appendChild(document.createTextNode(' [' + i.id + '] ' + labelFn(i)));
+      box.appendChild(row);
+    });
+    if (k === 'C' && found.length > 1) {
+      var all = el('div', 'color:#8ab4f8;cursor:pointer;margin-top:3px', '✓ выбрать все найденные (' + found.length + ')');
+      all.onclick = function () { found.forEach(function (i) { sel[i.id] = i; }); renderList(k, items, sel, labelFn); renderSel(k, sel); };
+      box.appendChild(all);
+    }
+  }
+  function renderSel(k, sel) {
+    var ids = Object.keys(sel);
+    $('sel' + k).textContent = ids.length ? 'выбрано ' + ids.length + ': ' + ids.map(function (id) { return sel[id].name; }).join(' · ').slice(0, 300) : '';
+    $('apply').disabled = true; $('apply').style.background = '#555'; $('apply').style.cursor = 'not-allowed';
+  }
+
+  Promise.all([req('GET', '/landing_pages'), req('GET', '/offers'), req('GET', '/campaigns')]).then(function (r) {
+    S.landings = r[0].filter(function (x) { return x.state !== 'deleted'; });
+    S.offers = r[1].filter(function (x) { return x.state !== 'deleted'; });
+    S.campaigns = r[2].filter(function (x) { return x.state !== 'deleted'; });
+    status('Загружено: лендов ' + S.landings.length + ' · офферов ' + S.offers.length + ' · кампаний ' + S.campaigns.length);
+    $('qL').oninput = function () { renderList('L', S.landings, S.selL, function (i) { return i.name; }); };
+    $('qO').oninput = function () { renderList('O', S.offers, S.selO, function (i) { return i.name; }); };
+    $('qC').oninput = function () {
+      var keys = $('qC').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      var matched = keys.length ? S.campaigns.filter(function (c) { return keys.some(function (k) { return (c.name || '').indexOf(k) >= 0; }); }) : [];
+      renderListCampaigns(matched);
+    };
+    function renderListCampaigns(matched) {
+      var box = $('listC');
+      box.innerHTML = matched.length ? '' : '<span style="color:#777">введи ID кабинета — покажу кампании с ним в названии</span>';
+      matched.slice(0, 120).forEach(function (c) {
+        var row = el('label', 'display:block;cursor:pointer;padding:1px 2px');
+        var cb = el('input'); cb.type = 'checkbox'; cb.checked = !!S.selC[c.id];
+        cb.onchange = function () { if (cb.checked) { S.selC[c.id] = c; } else { delete S.selC[c.id]; } renderSel('C', S.selC); };
+        row.appendChild(cb); row.appendChild(document.createTextNode(' [' + c.id + '] ' + c.name));
+        box.appendChild(row);
+      });
+      if (matched.length > 1) {
+        var all = el('div', 'color:#8ab4f8;cursor:pointer;margin-top:3px', '✓ выбрать все найденные (' + matched.length + ')');
+        all.onclick = function () { matched.forEach(function (c) { S.selC[c.id] = c; }); renderListCampaigns(matched); renderSel('C', S.selC); };
+        box.appendChild(all);
+      }
+    }
+  }).catch(function (e) { status(e.message, true); });
+
+  $('plan').onclick = function () {
+    var L = Object.values(S.selL), O = Object.values(S.selO), C = Object.values(S.selC);
+    $('out').textContent = ''; S.plan = [];
+    if (!L.length && !O.length) { out('Не выбрано ни лендов, ни офферов — менять нечего.'); return; }
+    if (!C.length) { out('Не выбраны кампании.'); return; }
+    var lById = {}, oById = {};
+    S.landings.forEach(function (x) { lById[x.id] = x.name; });
+    S.offers.forEach(function (x) { oById[x.id] = x.name; });
+    status('Собираю потоки выбранных кампаний…');
+    Promise.all(C.map(function (c) { return req('GET', '/streams?campaign_id=' + c.id).then(function (st) { return { c: c, st: st }; }); })).then(function (rows) {
+      rows.forEach(function (row) {
+        var flows = row.st.filter(function (s) { return s.schema === 'landings' && s.state !== 'deleted'; });
+        if (!flows.length) { out('[' + row.c.id + '] ' + row.c.name + ' — нет потоков schema=landings, пропуск'); return; }
+        out('[' + row.c.id + '] ' + row.c.name);
+        flows.forEach(function (s) {
+          var oldL = (s.landings || []).map(function (x) { return lById[x.landing_id] || x.landing_id; }).join(', ') || '—';
+          var oldO = (s.offers || []).map(function (x) { return oById[x.offer_id] || x.offer_id; }).join(', ') || '—';
+          out('  поток [' + s.id + '] ' + (s.name || ''));
+          if (L.length) out('    ленды:  ' + oldL + '  →  ' + L.map(function (x) { return x.name; }).join(', '));
+          if (O.length) out('    офферы: ' + oldO + '  →  ' + O.map(function (x) { return x.name; }).join(', '));
+          S.plan.push(s);
+        });
+      });
+      if (S.plan.length) {
+        out('\nПотоков к правке: ' + S.plan.length + '. Жми ПРИМЕНИТЬ.');
+        $('apply').disabled = false; $('apply').style.background = '#7a2d2d'; $('apply').style.cursor = 'pointer';
+        status('План готов — проверь и применяй.');
+      } else { status('Менять нечего.'); }
+    }).catch(function (e) { status(e.message, true); });
+  };
+
+  $('apply').onclick = function () {
+    if (!S.plan.length) return;
+    if (!confirm('Записать изменения в ' + S.plan.length + ' поток(ов)? Это изменит живые кампании КТ.')) return;
+    var L = Object.values(S.selL), O = Object.values(S.selO);
+    var body = {};
+    if (L.length) { var shL = shares(L.length); body.landings = L.map(function (x, i) { return { landing_id: x.id, share: shL[i], state: 'active' }; }); }
+    if (O.length) { var shO = shares(O.length); body.offers = O.map(function (x, i) { return { offer_id: x.id, share: shO[i], state: 'active' }; }); }
+    $('apply').disabled = true;
+    var ok = 0, fail = 0, chain = Promise.resolve();
+    S.plan.forEach(function (s) {
+      chain = chain.then(function () {
+        return req('PUT', '/streams/' + s.id, body).then(function () { ok++; out('OK: поток [' + s.id + ']'); })
+          .catch(function (e) { fail++; out('FAIL: поток [' + s.id + '] — ' + e.message); });
+      });
+    });
+    chain.then(function () { status('Готово: обновлено ' + ok + ', ошибок ' + fail + '.'); S.plan = []; });
+  };
+})();
